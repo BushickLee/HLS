@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+env/
+
+# HLS Generated Files (Temporary streams & playlist files)
+static/live/*
+!static/live/.gitkeep
+
+# Generated Clips
+static/clips/*
+!static/clips/.gitkeep
+
+# Large files / Archives
+*.zip
+*.tar.gz
+*.mp4
+
+# Environment / Sensitive configuration
+.env
+.env.local
+*.env*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editors & IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
