@@ -30,6 +30,8 @@ class StreamManager:
                     print(f"Error cleaning {file_path}: {e}")
 
     def _get_ffmpeg_command(self, width: int, height: int, fps: int):
+        gop_size = fps  # 1초마다 키프레임 생성
+
         return [
             'ffmpeg',
             '-y',
@@ -41,11 +43,13 @@ class StreamManager:
             '-i', '-',
             '-c:v', 'libx264',
             '-pix_fmt', 'yuv420p',
-            '-preset', 'veryfast',
+            '-preset', 'ultrafast',   # 속도 우선
+            '-tune', 'zerolatency',    # 지연 시간 최소화 (핵심!)
+            '-g', str(gop_size),       # GOP 간격 강제
             '-f', 'hls',
-            '-hls_time', '2',
-            '-hls_list_size', '100',  # DVR (Time Machine) 지원을 위해 큰 값 설정
-            '-hls_flags', 'delete_segments+independent_segments',
+            '-hls_time', '1',          # 1초 단위로 쪼개기
+            '-hls_list_size', '10',    # 너무 긴 리스트는 클라이언트 부하 유발
+            '-hls_flags', 'delete_segments+independent_segments+split_by_time',
             '-hls_segment_filename', os.path.join(self.output_dir, f"{self.stream_name}_%03d.ts"),
             self.m3u8_path
         ]
@@ -53,8 +57,15 @@ class StreamManager:
     async def start_streaming(self):
         if self.is_running:
             return
+        
 
         self.cap = cv2.VideoCapture(0)
+        # --- 해상도 조절 코드 추가 ---
+        # 예: 640x480 (VGA 해상도)로 낮추기
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # --------------------------
+
         if not self.cap.isOpened():
             print("Error: Could not open webcam.")
             return
