@@ -2,7 +2,9 @@ import cv2
 import subprocess
 import os
 import asyncio
-import signal
+import threading
+import time
+import shutil
 from typing import Optional
 
 class StreamManager:
@@ -13,8 +15,12 @@ class StreamManager:
         self.process: Optional[subprocess.Popen] = None
         self.cap: Optional[cv2.VideoCapture] = None
         self.is_running = False
+        self.thread: Optional[threading.Thread] = None
 
         self._ensure_clean_dir()
+
+    def _get_ffmpeg_path(self):
+        return shutil.which("ffmpeg") or r"C:\ffmpeg\bin\ffmpeg.exe"
 
     def _ensure_clean_dir(self):
         if not os.path.exists(self.output_dir):
@@ -33,7 +39,7 @@ class StreamManager:
         gop_size = fps  # 1초마다 키프레임 생성
 
         return [
-            'ffmpeg',
+            self._get_ffmpeg_path(),
             '-y',
             '-f', 'rawvideo',
             '-vcodec', 'rawvideo',
@@ -57,66 +63,93 @@ class StreamManager:
     async def start_streaming(self):
         if self.is_running:
             return
-        
-
-        self.cap = cv2.VideoCapture(0)
-        # --- 해상도 조절 코드 추가 ---
-        # 예: 640x480 (VGA 해상도)로 낮추기
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        # --------------------------
-
-        if not self.cap.isOpened():
-            print("Error: Could not open webcam.")
-            return
-
-        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 30
-
-        command = self._get_ffmpeg_command(width, height, fps)
-        
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE # 0.46.0 uvicorn doesn't like direct stderr sometimes, but useful for debugging
-        )
 
         self.is_running = True
-        
-        loop = asyncio.get_event_loop()
+        self.thread = threading.Thread(target=self._streaming_loop, daemon=True)
+        self.thread.start()
+
+    def _streaming_loop(self):
+        cap: Optional[cv2.VideoCapture] = None
+        process: Optional[subprocess.Popen] = None
+
         try:
+            cap = cv2.VideoCapture(0)
+            self.cap = cap
+
+            # 예: 640x480 (VGA 해상도)로 낮추기
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+            if not cap.isOpened():
+                print("Error: Could not open webcam.")
+                self.is_running = False
+                return
+
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+
+            command = self._get_ffmpeg_command(width, height, fps)
+
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            self.process = process
+
             while self.is_running:
-                ret, frame = await loop.run_in_executor(None, self.cap.read)
+                ret, frame = cap.read()
                 if not ret:
                     break
-                
-                if self.process and self.process.stdin:
-                    self.process.stdin.write(frame.tobytes())
-                
-                await asyncio.sleep(1/fps)
+
+                if process.stdin:
+                    try:
+                        process.stdin.write(frame.tobytes())
+                    except (BrokenPipeError, OSError):
+                        break
+
+                time.sleep(1 / fps)
         except Exception as e:
             print(f"Streaming error: {e}")
         finally:
-            await self.stop_streaming()
+            self._release_resources(cap, process)
 
     async def stop_streaming(self):
         self.is_running = False
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-        
-        if self.process:
-            if self.process.stdin:
-                self.process.stdin.close()
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            self.process = None
-        
+
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+
+        self._release_resources(self.cap, self.process)
         print("Streaming stopped.")
+
+    def _release_resources(
+        self,
+        cap: Optional[cv2.VideoCapture],
+        process: Optional[subprocess.Popen],
+    ):
+        if cap:
+            cap.release()
+
+        if process:
+            if process.stdin:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+        if cap is self.cap:
+            self.cap = None
+
+        if process is self.process:
+            self.process = None
 
     async def create_clip(self, start_time: str, duration: str, output_name: str):
         """
@@ -128,7 +161,7 @@ class StreamManager:
             os.makedirs("static/clips")
 
         command = [
-            'ffmpeg',
+            self._get_ffmpeg_path(),
             '-y',
             '-i', self.m3u8_path,
             '-ss', start_time,
